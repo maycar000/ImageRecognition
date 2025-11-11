@@ -15,6 +15,18 @@ import requests
 import datetime
 import sys
 import io
+import json
+
+# Try to load from .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("✓ Loaded .env file")
+except ImportError:
+    pass
+
+# Load Gemini API key
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
 # Try to import keyboard (optional - for ESC key functionality)
 KEYBOARD_AVAILABLE = False
@@ -70,6 +82,7 @@ class APClassroomOCR:
         self.uploaded_image_urls = {}
         self.imgbb_api_key = "0de54180b4129154bf273314eaf01ef5"
         self.should_stop = False
+        self.ai_enabled = GEMINI_API_KEY is not None
 
     def setup_escape_listener(self):
         """Set up ESC key listener to stop the process (if keyboard module available)"""
@@ -111,8 +124,8 @@ class APClassroomOCR:
             'â€': '"',
             'â€˜': "'",
             'â€¦': '...',
-            'â€"': '—',
             'â€"': '–',
+            'â€"': '—',
         }
         
         cleaned_text = text
@@ -120,6 +133,94 @@ class APClassroomOCR:
             cleaned_text = cleaned_text.replace(bad_char, good_char)
         
         return cleaned_text
+    
+    def analyze_question_with_gemini(self, question, options, image_url=None):
+        """
+        Use Google Gemini API to analyze question and determine correct answer
+        """
+        if not self.ai_enabled:
+            return 0
+            
+        try:
+            # Build the prompt
+            prompt_parts = [
+                "You are an expert AP exam test-taker analyzing a multiple choice question.",
+                f"\nQuestion: {question}",
+                "\nAnswer choices:"
+            ]
+            
+            for i, option in enumerate(options, 1):
+                if option.strip():
+                    prompt_parts.append(f"{i}. {option}")
+            
+            prompt_parts.extend([
+                "\nAnalyze this question carefully using your knowledge and reasoning.",
+                "Determine which answer is most likely correct.",
+                "Respond with ONLY a single number (1-5) representing the correct answer.",
+                "Do not include any explanation, just the number.",
+                "If you cannot determine the answer with high confidence, respond with '0'."
+            ])
+            
+            if image_url:
+                prompt_parts.append(f"\nNote: This question has an associated image/passage. Consider that visual context may be important.")
+            
+            prompt = "\n".join(prompt_parts)
+            
+            # Call Gemini API
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,  # Low temperature for consistent answers
+                    "maxOutputTokens": 10,
+                    "topP": 0.8,
+                    "topK": 10
+                }
+            }
+            
+            response = requests.post(
+                api_url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract answer from Gemini response
+                if 'candidates' in data and len(data['candidates']) > 0:
+                    candidate = data['candidates'][0]
+                    if 'content' in candidate and 'parts' in candidate['content']:
+                        answer_text = candidate['content']['parts'][0]['text'].strip()
+                        
+                        # Extract number from response
+                        try:
+                            answer_num = int(answer_text)
+                            if 1 <= answer_num <= 5:
+                                return answer_num
+                        except ValueError:
+                            # Try to find first digit in response
+                            for char in answer_text:
+                                if char.isdigit():
+                                    num = int(char)
+                                    if 1 <= num <= 5:
+                                        return num
+            elif response.status_code == 429:
+                print(f"\n    ⚠️ Rate limit exceeded. Waiting 60s...")
+                time.sleep(60)
+                return self.analyze_question_with_gemini(question, options, image_url)
+            
+            return 0  # Could not determine
+            
+        except Exception as e:
+            print(f"\n    ⚠️ AI analysis error: {e}")
+            return 0
     
     def extract_question_and_answers(self):
         """
@@ -297,7 +398,7 @@ class APClassroomOCR:
             
             screenshots = []
             
-            print(f"   🔍 Searching for left panel content...")
+            print(f"   📸 Searching for left panel content...")
             
             # STRATEGY 1: Find by the EXACT class combination
             try:
@@ -398,81 +499,6 @@ class APClassroomOCR:
                         
             except Exception as e:
                 print(f"    ⚠️ Strategy 3 failed: {e}")
-            
-            # STRATEGY 4: Find by ID pattern
-            try:
-                containers = self.driver.find_elements(By.CSS_SELECTOR, '[id$="-container"]')
-                
-                for container in containers:
-                    if not container.is_displayed():
-                        continue
-                    
-                    widget_type = container.get_attribute('data-lrn-widget-type')
-                    if widget_type == 'feature':
-                        rect = container.rect
-                        
-                        if rect['width'] > 200 and rect['height'] > 200:
-                            print(f"    ✅ Found LEFT PANEL by ID pattern!")
-                            print(f"    📏 Panel size: {rect['width']}x{rect['height']}")
-                            
-                            self.driver.execute_script("arguments[0].scrollTop = 0;", container)
-                            time.sleep(0.3)
-                            
-                            screenshot_data = container.screenshot_as_png
-                            filename = f"Q{question_num}_passage_panel.png"
-                            filepath = os.path.join(images_folder, filename)
-                            
-                            with open(filepath, 'wb') as f:
-                                f.write(screenshot_data)
-                            
-                            screenshots.append({
-                                'filename': filename,
-                                'description': 'Full Passage Panel'
-                            })
-                            
-                            print(f"    ✅ Captured panel at 50% zoom!")
-                            return screenshots
-                            
-            except Exception as e:
-                print(f"    ⚠️ Strategy 4 failed: {e}")
-            
-            # STRATEGY 5: Parent traversal from lrn_sharedpassage
-            try:
-                shared_passage = self.driver.find_element(By.CSS_SELECTOR, '.lrn_sharedpassage')
-                
-                if shared_passage:
-                    parent_container = self.driver.execute_script(
-                        "return arguments[0].parentElement.parentElement;", 
-                        shared_passage
-                    )
-                    
-                    if parent_container and parent_container.is_displayed():
-                        rect = parent_container.rect
-                        
-                        if rect['width'] > 200 and rect['height'] > 200:
-                            print(f"    ✅ Found LEFT PANEL via parent traversal!")
-                            print(f"    📏 Panel size: {rect['width']}x{rect['height']}")
-                            
-                            self.driver.execute_script("arguments[0].scrollTop = 0;", parent_container)
-                            time.sleep(0.3)
-                            
-                            screenshot_data = parent_container.screenshot_as_png
-                            filename = f"Q{question_num}_passage_panel.png"
-                            filepath = os.path.join(images_folder, filename)
-                            
-                            with open(filepath, 'wb') as f:
-                                f.write(screenshot_data)
-                            
-                            screenshots.append({
-                                'filename': filename,
-                                'description': 'Full Passage Panel'
-                            })
-                            
-                            print(f"    ✅ Captured panel at 50% zoom!")
-                            return screenshots
-                            
-            except Exception as e:
-                print(f"    ⚠️ Strategy 5 failed: {e}")
             
             # FALLBACK: Capture just the image
             print(f"    ⚠️ Could not find full panel - trying fallback...")
@@ -607,7 +633,7 @@ class APClassroomOCR:
             time.sleep(wait_time)
             
             # Extract content
-            print(f"   🔍 Extracting content...")
+            print(f"   📖 Extracting content...")
             extracted_data = self.extract_question_and_answers()
             
             if extracted_data:
@@ -615,7 +641,7 @@ class APClassroomOCR:
                 cleaned_question = self.clean_text(extracted_data['question'])
                 cleaned_answers = [self.clean_text(answer) for answer in extracted_data['answers']]
                 
-                # Take screenshots (FIXED - will capture passage panel)
+                # Take screenshots
                 print(f"   📸 Capturing passage/source material...")
                 screenshots = self.take_precise_screenshot(i + 1)
                 
@@ -655,11 +681,18 @@ class APClassroomOCR:
                     break
 
     def save_results_quizizz_csv(self, output_file):
-        """Save results in Quizizz CSV format with UNIQUE filename"""
+        """Save results in Quizizz CSV format with AI-detected answers"""
         # Create unique filename with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = os.path.splitext(output_file)[0]
         unique_file = f"{base_name}_{timestamp}.csv"
+        
+        print("\n" + "="*70)
+        if self.ai_enabled:
+            print("🤖 ANALYZING ANSWERS WITH GEMINI AI...")
+        else:
+            print("💾 SAVING RESULTS (AI disabled - no API key)")
+        print("="*70)
         
         with open(unique_file, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
@@ -667,7 +700,10 @@ class APClassroomOCR:
             # Quizizz CSV header
             writer.writerow(['Question', 'Question Type', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Option 5', 'Correct Answer', 'Image Link'])
             
-            for result in self.ocr_results:
+            ai_detected = 0
+            ai_uncertain = 0
+            
+            for idx, result in enumerate(self.ocr_results, 1):
                 if result['question_text'].startswith('[Question'):
                     continue
                 
@@ -678,23 +714,34 @@ class APClassroomOCR:
                 while len(options) < 5:
                     options.append("")
                 
-                # Get PASSAGE PANEL image URL (prioritize the panel screenshot)
+                # Get PASSAGE PANEL image URL
                 image_link = ""
                 if result['screenshots']:
-                    # Look for the passage panel screenshot first
                     for screenshot in result['screenshots']:
                         if 'passage_panel' in screenshot['filename']:
                             key = f"Q{result['question_num']}_{screenshot['filename']}"
                             image_link = self.uploaded_image_urls.get(key, "")
                             break
                     
-                    # If no passage panel, use first screenshot
                     if not image_link and result['screenshots']:
                         primary_screenshot = result['screenshots'][0]
                         key = f"Q{result['question_num']}_{primary_screenshot['filename']}"
                         image_link = self.uploaded_image_urls.get(key, "")
                 
+                # AI ANALYSIS HERE
                 correct_answer = ""
+                if self.ai_enabled:
+                    print(f"    [{idx}/{len([r for r in self.ocr_results if not r['question_text'].startswith('[Question')])}] Analyzing... ", end="", flush=True)
+                    
+                    answer_num = self.analyze_question_with_gemini(question, options, image_link)
+                    
+                    if answer_num > 0:
+                        correct_answer = str(answer_num)
+                        ai_detected += 1
+                        print(f"✅ Option {answer_num}")
+                    else:
+                        ai_uncertain += 1
+                        print("⚠️ Uncertain")
                 
                 writer.writerow([
                     question,
@@ -707,6 +754,13 @@ class APClassroomOCR:
                     correct_answer,
                     image_link
                 ])
+        
+        if self.ai_enabled:
+            print(f"\n🎯 AI Analysis Results:")
+            print(f"   ✅ Answers detected: {ai_detected}")
+            print(f"   ⚠️  Uncertain: {ai_uncertain}")
+            if ai_detected + ai_uncertain > 0:
+                print(f"   📊 Success rate: {int(ai_detected/(ai_detected+ai_uncertain)*100)}%")
         
         print(f"\n💾 Saved Quizizz CSV: {unique_file}")
         return unique_file
@@ -723,8 +777,28 @@ class APClassroomOCR:
 
 def main():
     print("=" * 80)
-    print("AP CLASSROOM EXTRACTOR - WITH IMAGES & QUIZIZZ EXPORT")
+    print("AP CLASSROOM EXTRACTOR - WITH AI ANSWER DETECTION")
     print("=" * 80)
+    
+    # Check for Gemini API key
+    if not GEMINI_API_KEY:
+        print("\n⚠️  WARNING: GEMINI_API_KEY not found!")
+        print("=" * 80)
+        print("The script will extract questions but won't detect answers.")
+        print("\nTo enable AI answer detection:")
+        print("1. Get FREE API key: https://makersuite.google.com/app/apikey")
+        print("2. Create .env file with: GEMINI_API_KEY=your-key-here")
+        print("3. Or set environment variable")
+        print("=" * 80)
+        
+        choice = input("\nContinue without AI? [Y/n]: ").strip().lower()
+        if choice == 'n':
+            print("\n👋 Exiting. Please set up your API key first.")
+            return
+        print("\n▶️  Continuing without AI answer detection...\n")
+    else:
+        print("\n✅ Gemini AI enabled - answers will be automatically detected!")
+        print("=" * 80)
     
     ocr = APClassroomOCR(tesseract_path=TESSERACT_PATH)
     
@@ -745,9 +819,14 @@ def main():
         print("=" * 80)
         input()
         
-        print(f"\n▶  Starting...")
+        print(f"\n▶  Starting extraction...")
         print(f"    Questions: {MAX_CLICKS}")
-        print(f"    Wait: {WAIT_TIME}s\n")
+        print(f"    Wait time: {WAIT_TIME}s")
+        if ocr.ai_enabled:
+            print(f"    AI: ENABLED ✅")
+        else:
+            print(f"    AI: DISABLED ⚠️")
+        print()
         
         # Run automation
         ocr.run_automation(MAX_CLICKS, WAIT_TIME, OUTPUT_FOLDER)
@@ -760,7 +839,7 @@ def main():
         print(f"\n📤 Uploading images to ImgBB...")
         total_uploaded = ocr.upload_all_screenshots()
         
-        # Save Quizizz CSV (with unique filename)
+        # Save Quizizz CSV (with AI-detected answers)
         base_output_path = os.path.splitext(OCR_RESULTS_FILE)[0]
         csv_file = f"{base_output_path}_quizizz.csv"
         final_csv = ocr.save_results_quizizz_csv(csv_file)
@@ -775,26 +854,16 @@ def main():
         print(f"🌐 Images uploaded: {total_uploaded}")
         print(f"📊 Quizizz CSV: {final_csv}")
         
+        if ocr.ai_enabled:
+            print("\n🤖 AI ANSWER DETECTION:")
+            print("   ✅ Answers automatically detected and added to CSV!")
+            print("   💡 Review answers marked 'Uncertain' before importing")
+        else:
+            print("\n⚠️  AI DISABLED:")
+            print("   Correct answers column is empty")
+            print("   You'll need to add them manually or run ai_answer_detector_gemini.py")
+        
         print("\n🎮 QUIZIZZ IMPORT STEPS:")
         print("   1. Go to quizizz.com → Create → Quiz")
         print("   2. Click 'Import from Spreadsheet'")
         print("   3. Upload the CSV file")
-        if total_uploaded > 0:
-            print("   4. All images will automatically load from ImgBB URLs! 🎉")
-        print("   5. Set correct answers")
-        print("   6. Share your quiz!")
-        
-        print("=" * 80)
-        
-    except KeyboardInterrupt:
-        print("\n\n⚠️ Cancelled by user")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        ocr.cleanup()
-        print("\n👋 Closed")
-
-if __name__ == "__main__":
-    main()
