@@ -147,42 +147,43 @@ class APClassroomOCR:
         
         return cleaned_text
     
-    def analyze_question_with_gemini(self, question, options, image_url=None):
-        """Use Google Gemini API to analyze question"""
+    def analyze_all_questions_with_gemini(self, questions_data, retry_count=0):
+        """Analyze ALL questions in a single API request"""
         if not self.ai_enabled:
             print("      [AI] Disabled - no API key")
-            return 0
+            return {}
+        
+        if retry_count >= 3:
+            print(f"      [AI] ⚠️  Too many rate limits, skipping")
+            return {}
             
         try:
-            print(f"\n      [AI] Building prompt...")
+            print(f"\n      [AI] Building batch prompt for {len(questions_data)} questions...")
             
-            # Build the prompt
+            # Build one large prompt with all questions
             prompt_parts = [
-                "You are an expert AP exam test-taker analyzing a multiple choice question.",
-                f"\nQuestion: {question}",
-                "\nAnswer choices:"
+                "You are an expert AP exam test-taker. I will give you multiple questions.",
+                "For each question, determine the correct answer (1-5).",
+                "Respond with ONLY a JSON array of numbers, like: [3, 1, 4, 2, 5]",
+                "Use 0 if uncertain. No explanations, just the JSON array.",
+                "\n=== QUESTIONS ===\n"
             ]
             
-            for i, option in enumerate(options, 1):
-                if option.strip():
-                    prompt_parts.append(f"{i}. {option}")
+            for idx, q_data in enumerate(questions_data, 1):
+                prompt_parts.append(f"\nQUESTION {idx}:")
+                prompt_parts.append(q_data['question'])
+                prompt_parts.append("\nOptions:")
+                for i, option in enumerate(q_data['options'], 1):
+                    if option.strip():
+                        prompt_parts.append(f"  {i}. {option}")
+                prompt_parts.append("")
             
-            prompt_parts.extend([
-                "\nAnalyze this question carefully using your knowledge and reasoning.",
-                "Determine which answer is most likely correct.",
-                "Respond with ONLY a single number (1-5) representing the correct answer.",
-                "Do not include any explanation, just the number.",
-                "If you cannot determine the answer with high confidence, respond with '0'."
-            ])
-            
-            if image_url:
-                prompt_parts.append(f"\nNote: This question has an associated image/passage.")
+            prompt_parts.append("\nRespond with ONLY the JSON array of answers: [answer1, answer2, ...]")
             
             prompt = "\n".join(prompt_parts)
             
-            print(f"      [AI] Calling Gemini API...")
+            print(f"      [AI] Calling Gemini API (single request)...")
             
-            # FIXED: Use gemini-2.5-flash
             api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
             
             payload = {
@@ -193,7 +194,7 @@ class APClassroomOCR:
                 }],
                 "generationConfig": {
                     "temperature": 0.1,
-                    "maxOutputTokens": 10,
+                    "maxOutputTokens": 100,
                     "topP": 0.8,
                     "topK": 10
                 }
@@ -203,59 +204,67 @@ class APClassroomOCR:
                 api_url,
                 headers={"Content-Type": "application/json"},
                 json=payload,
-                timeout=30
+                timeout=60
             )
             
             print(f"      [AI] Response status: {response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
-                print(f"      [AI] Response received")
+                print(f"      [AI] Response received!")
                 
-                # Extract answer from Gemini response
                 if 'candidates' in data and len(data['candidates']) > 0:
                     candidate = data['candidates'][0]
                     if 'content' in candidate and 'parts' in candidate['content']:
                         answer_text = candidate['content']['parts'][0]['text'].strip()
-                        print(f"      [AI] Raw answer: '{answer_text}'")
+                        print(f"      [AI] Raw response: {answer_text[:200]}...")
                         
-                        # Extract number
+                        # Try to extract JSON array
                         try:
-                            answer_num = int(answer_text)
-                            if 1 <= answer_num <= 5:
-                                print(f"      [AI] ✅ Detected answer: {answer_num}")
-                                return answer_num
-                        except ValueError:
-                            # Try to find first digit
-                            for char in answer_text:
-                                if char.isdigit():
-                                    num = int(char)
-                                    if 1 <= num <= 5:
-                                        print(f"      [AI] ✅ Extracted answer: {num}")
-                                        return num
-                
-                print(f"      [AI] ⚠️  Could not parse answer")
+                            # Remove markdown code blocks if present
+                            clean_text = answer_text.replace('```json', '').replace('```', '').strip()
+                            
+                            # Find JSON array
+                            import re
+                            match = re.search(r'\[[\d,\s]+\]', clean_text)
+                            if match:
+                                json_str = match.group(0)
+                                answers = json.loads(json_str)
+                                
+                                print(f"      [AI] ✅ Parsed answers: {answers}")
+                                
+                                # Create result dictionary
+                                results = {}
+                                for idx, answer in enumerate(answers, 1):
+                                    if isinstance(answer, int) and 0 <= answer <= 5:
+                                        results[idx] = answer
+                                
+                                return results
+                            else:
+                                print(f"      [AI] ⚠️  No JSON array found in response")
+                        except Exception as e:
+                            print(f"      [AI] ⚠️  Could not parse JSON: {e}")
                 
             elif response.status_code == 429:
-                print(f"      [AI] ⚠️  Rate limit - waiting 60s...")
-                time.sleep(60)
-                return self.analyze_question_with_gemini(question, options, image_url)
+                wait_time = 15 * (retry_count + 1)
+                print(f"      [AI] ⚠️  Rate limit - waiting {wait_time}s (attempt {retry_count + 1}/3)...")
+                time.sleep(wait_time)
+                return self.analyze_all_questions_with_gemini(questions_data, retry_count + 1)
             else:
                 print(f"      [AI] ❌ API Error: {response.status_code}")
                 try:
                     error_data = response.json()
-                    print(f"      [AI] Error message: {error_data.get('error', {}).get('message', 'Unknown error')}")
+                    print(f"      [AI] Error: {error_data.get('error', {}).get('message', 'Unknown')}")
                 except:
                     pass
-                print(f"      [AI] Full response: {response.text[:300]}")
             
-            return 0
+            return {}
             
         except Exception as e:
             print(f"      [AI] ❌ Error: {e}")
             import traceback
             traceback.print_exc()
-            return 0
+            return {}
     
     def extract_question_and_answers(self):
         """Extract question and answers"""
@@ -625,6 +634,29 @@ class APClassroomOCR:
             print("💾 SAVING RESULTS (No AI)")
         print("="*70)
         
+        # Prepare all questions for batch analysis
+        ai_answers = {}
+        if self.ai_enabled:
+            questions_data = []
+            valid_indices = []
+            
+            for idx, result in enumerate(self.ocr_results, 1):
+                if not result['question_text'].startswith('[Question'):
+                    options = result['answers'][:5]
+                    while len(options) < 5:
+                        options.append("")
+                    
+                    questions_data.append({
+                        'question': result['question_text'],
+                        'options': options
+                    })
+                    valid_indices.append(idx)
+            
+            if questions_data:
+                print(f"\n   📦 Sending {len(questions_data)} questions in ONE request...")
+                ai_answers = self.analyze_all_questions_with_gemini(questions_data)
+        
+        # Now write CSV with the answers
         with open(unique_file, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
             
@@ -632,11 +664,13 @@ class APClassroomOCR:
             
             ai_detected = 0
             ai_uncertain = 0
+            valid_idx = 0
             
             for idx, result in enumerate(self.ocr_results, 1):
                 if result['question_text'].startswith('[Question'):
                     continue
                 
+                valid_idx += 1
                 question = result['question_text']
                 
                 options = result['answers'][:5]
@@ -652,19 +686,15 @@ class APClassroomOCR:
                             break
                 
                 correct_answer = ""
-                if self.ai_enabled:
-                    print(f"\n   [{idx}] Analyzing question {result['question_num']}...")
-                    print(f"      Q: {question[:60]}...")
-                    
-                    answer_num = self.analyze_question_with_gemini(question, options, image_link)
-                    
+                if self.ai_enabled and valid_idx in ai_answers:
+                    answer_num = ai_answers[valid_idx]
                     if answer_num > 0:
                         correct_answer = str(answer_num)
                         ai_detected += 1
-                        print(f"      ✅ Answer: Option {answer_num}")
+                        print(f"   [{valid_idx}] Q{result['question_num']}: Answer = Option {answer_num}")
                     else:
                         ai_uncertain += 1
-                        print(f"      ⚠️  Uncertain")
+                        print(f"   [{valid_idx}] Q{result['question_num']}: Uncertain")
                 
                 writer.writerow([
                     question,
