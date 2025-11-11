@@ -1,4 +1,12 @@
+# Core dependencies for screenshot automation
 selenium>=4.15.0
 pillow>=10.0.0
 pytesseract>=0.3.10
 webdriver-manager>=4.0.0
+
+# AI answer detection dependencies
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Optional: Enhanced keyboard control
+keyboard>=0.13.5
