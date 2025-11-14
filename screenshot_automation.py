@@ -1,5 +1,6 @@
 """
 DEBUG VERSION - Shows detailed output to troubleshoot issues
+FIXED: Screenshot functionality now matches WORKINGSCREENSHOTRECORDER.py
 """
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -28,12 +29,12 @@ try:
 except ImportError:
     print("⚠️  python-dotenv not installed")
 
-# Load Gemini API key
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+# Load OpenRouter API key
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
-print(f"\n🔑 API Key Status: {'SET ✅' if GEMINI_API_KEY else 'NOT SET ❌'}")
-if GEMINI_API_KEY:
-    print(f"   Key prefix: {GEMINI_API_KEY[:20]}...")
+print(f"\n🔑 API Key Status: {'SET ✅' if OPENROUTER_API_KEY else 'NOT SET ❌'}")
+if OPENROUTER_API_KEY:
+    print(f"   Key prefix: {OPENROUTER_API_KEY[:20]}...")
 
 # Try to import keyboard
 KEYBOARD_AVAILABLE = False
@@ -94,7 +95,7 @@ class APClassroomOCR:
         self.uploaded_image_urls = {}
         self.imgbb_api_key = "0de54180b4129154bf273314eaf01ef5"
         self.should_stop = False
-        self.ai_enabled = GEMINI_API_KEY is not None
+        self.ai_enabled = OPENROUTER_API_KEY is not None
         
         print(f"🤖 AI Status: {'ENABLED ✅' if self.ai_enabled else 'DISABLED ❌'}")
 
@@ -147,16 +148,18 @@ class APClassroomOCR:
         
         return cleaned_text
     
-    def analyze_question_with_gemini(self, question, options, image_url=None):
-        """Use Google Gemini API to analyze question"""
+    def analyze_question_with_openrouter(self, question, options, image_url=None):
+        """Use OpenRouter with Llama 4 Scout (FREE vision model)"""
         if not self.ai_enabled:
             print("      [AI] Disabled - no API key")
             return 0
             
         try:
+            from openai import OpenAI
+            
             print(f"\n      [AI] Building prompt...")
             
-            # Build the prompt
+            # Build the prompt text
             prompt_parts = [
                 "You are an expert AP exam test-taker analyzing a multiple choice question.",
                 f"\nQuestion: {question}",
@@ -167,86 +170,124 @@ class APClassroomOCR:
                 if option.strip():
                     prompt_parts.append(f"{i}. {option}")
             
-            prompt_parts.extend([
-                "\nAnalyze this question carefully using your knowledge and reasoning.",
-                "Determine which answer is most likely correct.",
-                "Respond with ONLY a single number (1-5) representing the correct answer.",
-                "Do not include any explanation, just the number.",
-                "If you cannot determine the answer with high confidence, respond with '0'."
-            ])
-            
             if image_url:
-                prompt_parts.append(f"\nNote: This question has an associated image/passage.")
+                prompt_parts.extend([
+                    "\n⚠️ CRITICAL INSTRUCTIONS:",
+                    "- Study the image/passage provided - it contains key information",
+                    "- Use BOTH the image AND the question text to determine the BEST answer",
+                    "- Your response must be ONLY a single digit: 1, 2, 3, 4, or 5",
+                    "- Do NOT write any explanation, reasoning, or other text",
+                    "- Do NOT write 'The answer is' or similar phrases",
+                    "- ONLY output the digit itself",
+                    "\nYour answer (digit only):"
+                ])
+            else:
+                prompt_parts.extend([
+                    "\n⚠️ CRITICAL INSTRUCTIONS:",
+                    "- Your response must be ONLY a single digit: 1, 2, 3, 4, 5"
+                    "- Do NOT write any explanation, reasoning, or other text",
+                    "- Do NOT write 'The answer is' or similar phrases",
+                    "- ONLY output the digit itself",
+                    "\nYour answer (digit only):"
+                ])
             
-            prompt = "\n".join(prompt_parts)
+            prompt_text = "\n".join(prompt_parts)
             
-            print(f"      [AI] Calling Gemini API...")
+            # Get OpenRouter API key from environment
+            openrouter_key = os.environ.get('OPENROUTER_API_KEY')
             
-            # Call Gemini API (using newest stable model)
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+            if not openrouter_key:
+                print("      [AI] ❌ No OPENROUTER_API_KEY in .env file")
+                return 0
             
-            payload = {
-                "contents": [{
-                    "parts": [{
-                        "text": prompt
-                    }]
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": 10,
-                    "topP": 0.8,
-                    "topK": 10
-                }
-            }
-            
-            response = requests.post(
-                api_url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=30
+            # Initialize OpenAI client with OpenRouter base URL
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_key,
             )
             
-            print(f"      [AI] Response status: {response.status_code}")
+            # Build message content (with or without image)
+            message_content = []
             
-            if response.status_code == 200:
-                data = response.json()
-                print(f"      [AI] Response received")
-                
-                # Extract answer from Gemini response
-                if 'candidates' in data and len(data['candidates']) > 0:
-                    candidate = data['candidates'][0]
-                    if 'content' in candidate and 'parts' in candidate['content']:
-                        answer_text = candidate['content']['parts'][0]['text'].strip()
-                        print(f"      [AI] Raw answer: '{answer_text}'")
-                        
-                        # Extract number
-                        try:
-                            answer_num = int(answer_text)
-                            if 1 <= answer_num <= 5:
-                                print(f"      [AI] ✅ Detected answer: {answer_num}")
-                                return answer_num
-                        except ValueError:
-                            # Try to find first digit
-                            for char in answer_text:
-                                if char.isdigit():
-                                    num = int(char)
-                                    if 1 <= num <= 5:
-                                        print(f"      [AI] ✅ Extracted answer: {num}")
-                                        return num
-                
-                print(f"      [AI] ⚠️  Could not parse answer")
-                
-            elif response.status_code == 429:
-                print(f"      [AI] ⚠️  Rate limit - waiting 60s...")
-                time.sleep(60)
-                return self.analyze_question_with_gemini(question, options, image_url)
+            # Add the text prompt FIRST
+            message_content.append({
+                "type": "text",
+                "text": prompt_text
+            })
+            
+            # Add image if available (AFTER text)
+            if image_url:
+                print(f"      [AI] 📸 Including image: {image_url[:50]}...")
+                message_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                })
+                print(f"      [AI] Using Llama 4 Scout (FREE vision model)")
             else:
-                print(f"      [AI] ❌ API Error: {response.status_code}")
-                print(f"      [AI] Response: {response.text[:200]}")
+                print(f"      [AI] Using Llama 4 Scout (text only)")
             
+            # Always use Llama 4 Scout (supports both text and images, and it's FREE!)
+            model = "meta-llama/llama-4-scout:free"
+            
+            print(f"      [AI] Calling OpenRouter...")
+            
+            # Call the API
+            completion = client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://github.com/APClassroom-QuestionExtractor",
+                    "X-Title": "AP Classroom Question Extractor",
+                },
+                extra_body={},
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": message_content
+                }],
+                max_tokens=10,
+                temperature=0.1
+            )
+            
+            print(f"      [AI] Response received")
+            
+            # Extract answer
+            answer_text = completion.choices[0].message.content.strip()
+            print(f"      [AI] Raw answer: '{answer_text}'")
+            
+            # Extract number
+            try:
+                answer_num = int(answer_text)
+                if 1 <= answer_num <= 5:
+                    print(f"      [AI] ✅ Detected answer: {answer_num}")
+                    return answer_num
+            except ValueError:
+                # Try to find first digit
+                for char in answer_text:
+                    if char.isdigit():
+                        num = int(char)
+                        if 1 <= num <= 5:
+                            print(f"      [AI] ✅ Extracted answer: {num}")
+                            return num
+            
+            print(f"      [AI] ⚠️  Could not parse answer")
+            return 0
+            
+        except ImportError:
+            print(f"      [AI] ❌ OpenAI library not installed")
+            print(f"      [AI] Run: pip install openai")
             return 0
             
         except Exception as e:
+            error_msg = str(e)
+            
+            # Handle rate limiting
+            if "429" in error_msg or "rate" in error_msg.lower():
+                print(f"      [AI] ⚠️  Rate limit - waiting 10s...")
+                time.sleep(10)
+                return self.analyze_question_with_openrouter(question, options, image_url)
+            
+            # Handle other errors
             print(f"      [AI] ❌ Error: {e}")
             import traceback
             traceback.print_exc()
@@ -417,63 +458,235 @@ class APClassroomOCR:
             return None
 
     def take_precise_screenshot(self, question_num):
-        """Take screenshot - with detailed logging"""
+        """Take screenshot of passage/source material - FIXED VERSION from WORKINGSCREENSHOTRECORDER.py"""
         try:
             images_folder = os.path.join(OUTPUT_FOLDER, "quizizz_images")
             os.makedirs(images_folder, exist_ok=True)
             
             screenshots = []
             
-            print(f"      [Screenshot] Searching for panels...")
+            print(f"   📷 Searching for left panel content...")
             
-            # Try multiple strategies
-            strategies = [
-                ('.two-columns.left-column.question-content', 'Class combo'),
-                ('[data-lrn-widget-type="feature"]', 'Data attribute'),
-                ('[class*="left-column"]', 'Left column class'),
-                ('.lrn_sharedpassage', 'Shared passage'),
-            ]
-            
-            for selector, strategy_name in strategies:
-                try:
-                    print(f"      [Screenshot] Trying: {strategy_name}")
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    print(f"      [Screenshot]   Found {len(elements)} elements")
+            # STRATEGY 1: Find by the EXACT class combination (most reliable)
+            try:
+                left_panel = self.driver.find_element(By.CSS_SELECTOR, 
+                    '.two-columns.left-column.question-content')
+                
+                if left_panel and left_panel.is_displayed():
+                    rect = left_panel.rect
+                    print(f"    ✅ Found LEFT PANEL by class combination!")
+                    print(f"    📏 Panel size: {rect['width']}x{rect['height']}")
                     
-                    for elem in elements:
-                        if elem.is_displayed():
-                            rect = elem.rect
-                            print(f"      [Screenshot]   Size: {rect['width']}x{rect['height']}")
-                            
-                            if rect['width'] > 200 and rect['height'] > 200:
-                                print(f"      [Screenshot]   ✅ Suitable element found!")
-                                
-                                self.driver.execute_script("arguments[0].scrollTop = 0;", elem)
-                                time.sleep(0.3)
-                                
-                                screenshot_data = elem.screenshot_as_png
-                                filename = f"Q{question_num}_passage_panel.png"
-                                filepath = os.path.join(images_folder, filename)
-                                
-                                with open(filepath, 'wb') as f:
-                                    f.write(screenshot_data)
-                                
-                                screenshots.append({
-                                    'filename': filename,
-                                    'description': f'{strategy_name} Panel'
-                                })
-                                
-                                print(f"      [Screenshot]   ✅ Saved: {filename}")
-                                return screenshots
-                                
-                except Exception as e:
-                    print(f"      [Screenshot]   ⚠️  {strategy_name} failed: {e}")
+                    # Scroll to top
+                    self.driver.execute_script("arguments[0].scrollTop = 0;", left_panel)
+                    time.sleep(0.3)
+                    
+                    # Capture screenshot
+                    screenshot_data = left_panel.screenshot_as_png
+                    filename = f"Q{question_num}_passage_panel.png"
+                    filepath = os.path.join(images_folder, filename)
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(screenshot_data)
+                    
+                    screenshots.append({
+                        'filename': filename,
+                        'description': 'Full Passage Panel'
+                    })
+                    
+                    print(f"    ✅ Captured full panel at 50% zoom!")
+                    return screenshots
+                    
+            except Exception as e:
+                print(f"    ⚠️  Strategy 1 failed: {str(e)[:50]}")
             
-            print(f"      [Screenshot] ❌ No panels captured")
+            # STRATEGY 2: Find by data-lrn-widget-type="feature"
+            try:
+                left_panel = self.driver.find_element(By.CSS_SELECTOR, 
+                    '[data-lrn-widget-type="feature"][class*="left-column"]')
+                
+                if left_panel and left_panel.is_displayed():
+                    rect = left_panel.rect
+                    print(f"    ✅ Found LEFT PANEL by data attribute!")
+                    print(f"    📏 Panel size: {rect['width']}x{rect['height']}")
+                    
+                    self.driver.execute_script("arguments[0].scrollTop = 0;", left_panel)
+                    time.sleep(0.3)
+                    
+                    screenshot_data = left_panel.screenshot_as_png
+                    filename = f"Q{question_num}_passage_panel.png"
+                    filepath = os.path.join(images_folder, filename)
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(screenshot_data)
+                    
+                    screenshots.append({
+                        'filename': filename,
+                        'description': 'Full Passage Panel'
+                    })
+                    
+                    print(f"    ✅ Captured full panel at 50% zoom!")
+                    return screenshots
+                    
+            except Exception as e:
+                print(f"    ⚠️  Strategy 2 failed: {str(e)[:50]}")
+            
+            # STRATEGY 3: Find any element with left-column class
+            try:
+                left_panels = self.driver.find_elements(By.CSS_SELECTOR, '[class*="left-column"]')
+                
+                for panel in left_panels:
+                    if not panel.is_displayed():
+                        continue
+                        
+                    rect = panel.rect
+                    
+                    # Should be substantial size and on the left side
+                    if rect['width'] > 200 and rect['height'] > 200 and rect['x'] < 800:
+                        print(f"    ✅ Found LEFT PANEL by class search!")
+                        print(f"    📏 Panel size: {rect['width']}x{rect['height']}")
+                        
+                        self.driver.execute_script("arguments[0].scrollTop = 0;", panel)
+                        time.sleep(0.3)
+                        
+                        screenshot_data = panel.screenshot_as_png
+                        filename = f"Q{question_num}_passage_panel.png"
+                        filepath = os.path.join(images_folder, filename)
+                        
+                        with open(filepath, 'wb') as f:
+                            f.write(screenshot_data)
+                        
+                        screenshots.append({
+                            'filename': filename,
+                            'description': 'Full Passage Panel'
+                        })
+                        
+                        print(f"    ✅ Captured panel at 50% zoom!")
+                        return screenshots
+                        
+            except Exception as e:
+                print(f"    ⚠️  Strategy 3 failed: {str(e)[:50]}")
+            
+            # STRATEGY 4: Find by ID pattern
+            try:
+                containers = self.driver.find_elements(By.CSS_SELECTOR, '[id$="-container"]')
+                
+                for container in containers:
+                    if not container.is_displayed():
+                        continue
+                    
+                    widget_type = container.get_attribute('data-lrn-widget-type')
+                    if widget_type == 'feature':
+                        rect = container.rect
+                        
+                        if rect['width'] > 200 and rect['height'] > 200:
+                            print(f"    ✅ Found LEFT PANEL by ID pattern!")
+                            print(f"    📏 Panel size: {rect['width']}x{rect['height']}")
+                            
+                            self.driver.execute_script("arguments[0].scrollTop = 0;", container)
+                            time.sleep(0.3)
+                            
+                            screenshot_data = container.screenshot_as_png
+                            filename = f"Q{question_num}_passage_panel.png"
+                            filepath = os.path.join(images_folder, filename)
+                            
+                            with open(filepath, 'wb') as f:
+                                f.write(screenshot_data)
+                            
+                            screenshots.append({
+                                'filename': filename,
+                                'description': 'Full Passage Panel'
+                            })
+                            
+                            print(f"    ✅ Captured panel at 50% zoom!")
+                            return screenshots
+                            
+            except Exception as e:
+                print(f"    ⚠️  Strategy 4 failed: {str(e)[:50]}")
+            
+            # STRATEGY 5: Parent traversal from lrn_sharedpassage
+            try:
+                shared_passage = self.driver.find_element(By.CSS_SELECTOR, '.lrn_sharedpassage')
+                
+                if shared_passage and shared_passage.is_displayed():
+                    # Try to get parent container
+                    parent_container = self.driver.execute_script(
+                        "return arguments[0].parentElement.parentElement;", 
+                        shared_passage
+                    )
+                    
+                    if parent_container and parent_container.is_displayed():
+                        rect = parent_container.rect
+                        
+                        if rect['width'] > 200 and rect['height'] > 200:
+                            print(f"    ✅ Found shared passage container!")
+                            print(f"    📏 Container size: {rect['width']}x{rect['height']}")
+                            
+                            self.driver.execute_script("arguments[0].scrollTop = 0;", parent_container)
+                            time.sleep(0.3)
+                            
+                            screenshot_data = parent_container.screenshot_as_png
+                            filename = f"Q{question_num}_passage_panel.png"
+                            filepath = os.path.join(images_folder, filename)
+                            
+                            with open(filepath, 'wb') as f:
+                                f.write(screenshot_data)
+                            
+                            screenshots.append({
+                                'filename': filename,
+                                'description': 'Shared Passage Panel'
+                            })
+                            
+                            print(f"    ✅ Captured shared passage at 50% zoom!")
+                            return screenshots
+                            
+            except Exception as e:
+                print(f"    ⚠️  Strategy 5 failed: {str(e)[:50]}")
+            
+            # FALLBACK: Capture any significant images
+            print(f"    ⚠️  Could not find panel - trying fallback...")
+            try:
+                all_images = self.driver.find_elements(By.TAG_NAME, 'img')
+                
+                for img in all_images:
+                    if img.is_displayed() and img.size['width'] > 100 and img.size['height'] > 100:
+                        rect = img.rect
+                        
+                        # Only capture images in the main content area
+                        if 50 < rect['y'] < 800:
+                            print(f"    ⚠️  FALLBACK: Capturing image")
+                            print(f"    📏 Image size: {img.size['width']}x{img.size['height']}")
+                            
+                            self.driver.execute_script(
+                                "arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});", 
+                                img
+                            )
+                            time.sleep(0.3)
+                            
+                            screenshot_data = img.screenshot_as_png
+                            filename = f"Q{question_num}_image_only.png"
+                            filepath = os.path.join(images_folder, filename)
+                            
+                            with open(filepath, 'wb') as f:
+                                f.write(screenshot_data)
+                            
+                            screenshots.append({
+                                'filename': filename,
+                                'description': 'Image Only (Fallback)'
+                            })
+                            
+                            print(f"    ⚠️  Only captured image at 50% zoom")
+                            return screenshots
+                            
+            except Exception as e:
+                print(f"    ❌ Fallback failed: {str(e)[:50]}")
+            
+            # Nothing captured
+            print(f"    ❌ No visual content found for this question")
             return screenshots
             
         except Exception as e:
-            print(f"      [Screenshot] ❌ Error: {e}")
+            print(f"    ❌ Screenshot error: {e}")
             import traceback
             traceback.print_exc()
             return []
@@ -615,7 +828,7 @@ class APClassroomOCR:
         
         print("\n" + "="*70)
         if self.ai_enabled:
-            print("🤖 ANALYZING ANSWERS WITH GEMINI AI...")
+            print("🤖 ANALYZING ANSWERS WITH AI...")
         else:
             print("💾 SAVING RESULTS (No AI)")
         print("="*70)
@@ -623,7 +836,7 @@ class APClassroomOCR:
         with open(unique_file, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
             
-            writer.writerow(['Question', 'Question Type', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Option 5', 'Correct Answer', 'Image Link'])
+            writer.writerow(['Question Text', 'Question Type', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Option 5', 'Correct Answer', 'Time in seconds', 'Image Link'])
             
             ai_detected = 0
             ai_uncertain = 0
@@ -638,20 +851,28 @@ class APClassroomOCR:
                 while len(options) < 5:
                     options.append("")
                 
+                # Get PASSAGE PANEL image URL (prioritize the panel screenshot)
                 image_link = ""
                 if result['screenshots']:
+                    # Look for the passage panel screenshot first
                     for screenshot in result['screenshots']:
-                        key = f"Q{result['question_num']}_{screenshot['filename']}"
-                        image_link = self.uploaded_image_urls.get(key, "")
-                        if image_link:
+                        if 'passage_panel' in screenshot['filename']:
+                            key = f"Q{result['question_num']}_{screenshot['filename']}"
+                            image_link = self.uploaded_image_urls.get(key, "")
                             break
+                    
+                    # If no passage panel, use first screenshot
+                    if not image_link and result['screenshots']:
+                        primary_screenshot = result['screenshots'][0]
+                        key = f"Q{result['question_num']}_{primary_screenshot['filename']}"
+                        image_link = self.uploaded_image_urls.get(key, "")
                 
                 correct_answer = ""
                 if self.ai_enabled:
                     print(f"\n   [{idx}] Analyzing question {result['question_num']}...")
                     print(f"      Q: {question[:60]}...")
                     
-                    answer_num = self.analyze_question_with_gemini(question, options, image_link)
+                    answer_num = self.analyze_question_with_openrouter(question, options, image_link)
                     
                     if answer_num > 0:
                         correct_answer = str(answer_num)
@@ -670,6 +891,7 @@ class APClassroomOCR:
                     options[3],
                     options[4],
                     correct_answer,
+                    "60",
                     image_link
                 ])
         
@@ -698,7 +920,7 @@ def main():
     print("AP CLASSROOM EXTRACTOR - DEBUG VERSION")
     print("=" * 80)
     
-    if not GEMINI_API_KEY:
+    if not OPENROUTER_API_KEY:
         print("\n⚠️  No API key - continuing without AI")
         choice = input("Continue? [Y/n]: ").strip().lower()
         if choice == 'n':
