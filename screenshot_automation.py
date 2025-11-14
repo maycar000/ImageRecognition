@@ -184,7 +184,7 @@ class APClassroomOCR:
             else:
                 prompt_parts.extend([
                     "\n⚠️ CRITICAL INSTRUCTIONS:",
-                    "- Your response must be ONLY a single digit: 1, 2, 3, 4, 5"
+                    "- Your response must be ONLY a single digit: 1, 2, 3, 4, 5",
                     "- Do NOT write any explanation, reasoning, or other text",
                     "- Do NOT write 'The answer is' or similar phrases",
                     "- ONLY output the digit itself",
